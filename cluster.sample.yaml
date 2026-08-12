@@ -1,0 +1,431 @@
+---
+# cluster.yaml.sample — per-cluster configuration
+# Copy to cluster.yaml, fill in values, then run: task configure
+# cluster.yaml is gitignored and never committed.
+#
+# Organization:
+#   §0 Profile — decides which of the fields below you actually need
+#   §1 Base — required for this profile (network, cloudflare API, repo)
+#   §2 Extras — only required when listed in `extras:`. Each subsection
+#               states which extras it's needed for.
+#
+# Fields marked (appliance: n/a) are rejected by validation under that profile —
+# they configure things an appliance either discovers at runtime or does not run.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §0. PROFILE (always required)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Deployment profile ────────────────────────────────────────────────────────
+# (REQUIRED) Who this cluster is for. No default — an unmigrated cluster.yaml
+# must fail validation rather than be rendered under an assumed profile.
+#
+#   "appliance"  Operator-delivered, single node, zero customer-supplied fields.
+#                Implies provisioning_path "omni" and storage_backend
+#                "local-path"; LAN addresses are discovered at runtime; off-site
+#                backup is mandatory.
+#   "prosumer"   Customer has some infrastructure (often a NAS) but the operator
+#                still configures the cluster.
+#   "full"       Expert operates it directly. Today's behaviour: everything is
+#                declared by hand.
+deployment_profile: "full"
+
+# ── Storage backend ───────────────────────────────────────────────────────────
+# (REQUIRED) Which storage class is the cluster default — what bulk media and
+# file shares land on. Databases are block-backed regardless; this axis does not
+# move them.
+#   "local-path"  node-local disk; no NAS needed
+#   "nfs"         NAS-backed; requires nas_server / nas_path below
+# Forced to "local-path" under the appliance profile.
+#
+# This picks the default, not which provisioners exist: every cluster installs
+# local-path-provisioner, because a NAS is not somewhere a database can live.
+# Choosing "nfs" additionally enables the NFS provisioner.
+storage_backend: "nfs"
+
+# (REQUIRED when anything lands on node-local storage — see below) Does this
+# cluster have exactly one node? Derived automatically for appliance (always
+# one) and for the manual Talos path (nodes.yaml is authoritative), but an Omni
+# cluster renders `nodes: []` so it cannot be inferred there.
+# single_node: true
+#
+# Node-local volumes live on one node and their PVs are pinned to it. On one
+# node that is correct; on several it silently pins every stateful workload to
+# whichever node scheduled it first, and losing that node loses the data and the
+# ability to restart elsewhere. The real answer there is replicated block
+# storage, which this stack does not provide yet.
+#
+# Two ways to end up on node-local storage, and both are asked about:
+#   - storage_backend: "local-path"  — everything lands there
+#   - a database extra               — claudecode/postgres, default/mariadb,
+#                                      default/postgres, freepbx/freepbx. These
+#                                      use the block tier even on a NAS-backed
+#                                      cluster, because NFS does not honour the
+#                                      fsync and lock semantics a database needs
+# So a three-node cluster with a NAS still has to answer this if it runs a
+# database. It is pinned just as hard; only the route there is different.
+# Setting db_storage_class to a non-node-local class below removes the second
+# route, and with it the question.
+# accept_node_pinning: true
+
+# (OPTIONAL) Deploy k8s-gateway, the in-cluster resolver for internal names.
+# On by default, because it is the only thing that answers them — Cloudflare
+# refuses to publish RFC1918 addresses, so there is no public-DNS route. The
+# operator points the router's DNS at it once during installation; see
+# docs/operations/router-dns.md. It shares its address with envoy-internal and
+# mqtt, so it costs nothing extra. Turn it off only where something else
+# resolves those names.
+# k8s_gateway: true
+
+# ── Block tier ────────────────────────────────────────────────────────────────
+# (OPTIONAL) Which storage class databases use. Defaults to "local-path" and
+# deliberately does not follow storage_backend — NFS is never a correct answer
+# for something that needs fsync durability and file locking.
+#
+# Name an NFS class instead (e.g. "sc-nas") only to record that a cluster's
+# database has not been moved yet: a PVC's storageClassName is immutable, so the
+# move is a dump and restore, not a re-render. Writing it down keeps "not yet
+# moved" visible instead of silent.
+# db_storage_class: "local-path"
+#
+# With storage_backend "replicated", set this to "longhorn" — installing
+# Longhorn does not move the database onto it by itself. Forgetting is caught
+# rather than silent: the database stays on a node-local class, so
+# accept_node_pinning is demanded and names the thing that was missed.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §1. BASE (required for this profile)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Provisioning path ─────────────────────────────────────────────────────────
+# (REQUIRED) How this cluster's machines are provisioned:
+#   "omni"   Machines register themselves with Omni over SideroLink. Omni supplies
+#            the machine config; leave nodes.yaml as `nodes: []`.
+#   "talos"  Manual Talos. Fill in nodes.yaml (one entry per machine) and run
+#            `task bootstrap:talos`.
+# Declared rather than inferred: nodes.yaml is created automatically for every
+# repo, so its presence cannot tell the two apart.
+provisioning_path: "omni"
+
+# ── Network ───────────────────────────────────────────────────────────────────
+# (REQUIRED) network CIDR for the nodes (e.g. 192.168.1.0/24)
+node_cidr: "10.9.9.0/24"
+
+# (REQUIRED for prosumer/full · appliance: n/a) Unused IPs in node_cidr for the
+# LB / VIP addresses. An appliance discovers its single LAN address at runtime
+# and needs none of these, so declaring them there is rejected.
+cluster_api_addr: "10.9.9.2"          # Kube API VIP / first controller IP
+cluster_dns_gateway_addr: "10.9.9.3"  # k8s-gateway (DNS) LB IP
+cluster_gateway_addr: "10.9.9.4"      # envoy-internal LB IP
+cloudflare_gateway_addr: "10.9.9.5"   # envoy-external LB IP
+
+# (OPTIONAL) Collapse every LAN-facing service onto one address. Their ports do
+# not overlap — envoy-internal 80/443, k8s-gateway 53, mqtt 1883 — so one
+# address serves all three, and the three addresses above become one.
+#
+# When set it supersedes cluster_gateway_addr, cluster_dns_gateway_addr and
+# mqtt_lb_ip: they stay declared, but all three render to this value.
+#
+# Opt-in, and it is a breaking change for the LAN: anything already pointed at
+# the old addresses — a resolver setting, an MQTT broker address, a HomeKit
+# pairing — has to be repointed. An appliance has no such history and collapses
+# from the start.
+# lan_shared_addr: "10.9.9.4"
+
+# Optional network overrides (the commented value is the actual default):
+# node_default_gateway: "10.9.9.1"                     # default: .1 of node_cidr
+# node_dns_servers: ["1.1.1.1", "1.0.0.1"]             # default: Cloudflare DNS
+# node_ntp_servers: ["162.159.200.1", "162.159.200.123"]
+# node_vlan_tag: ""                                    # https://www.talos.dev/latest/advanced/advanced-networking/#vlans
+# cluster_api_tls_sans: ["mycluster.example.com"]
+# cluster_pod_cidr: "10.42.0.0/16"
+
+# (REQUIRED) Cluster Service CIDR. Deliberately has no default — the correct
+# value depends on how the cluster was provisioned, and getting it wrong only
+# shows up after the cluster is already running:
+#   Omni-provisioned:  "10.96.0.0/12"   (verified on jg-jiahd)
+#   Manual Talos:      "10.43.0.0/16"   (verified on jcom)
+cluster_svc_cidr: "10.96.0.0/12"
+
+# coredns_cluster_ip is derived as .10 of cluster_svc_cidr. Set it only to
+# override that — it must stay inside cluster_svc_cidr or the Service fails.
+# coredns_cluster_ip: "10.96.0.10"
+
+# ── Cloudflare API + Tunnel ───────────────────────────────────────────────────
+# (REQUIRED) Domain you wish to use from your Cloudflare account
+cloudflare_domain: "example.com"
+
+# (REQUIRED) API Token: Zone:DNS:Edit + Account:Cloudflare Tunnel:Read
+cloudflare_token: ""
+
+# Main Cloudflare Tunnel:
+#   TOKEN + ID are read from `cloudflare-tunnel.json` (local, gitignored).
+#   Generate:
+#     cloudflared tunnel create --credentials-file cloudflare-tunnel.json kubernetes
+#   Or reconstruct from existing tunnel token (see templates/scripts/plugin.py).
+
+# ── GitHub webhook receiver (Flux) ────────────────────────────────────────────
+# (REQUIRED) Random token for Flux GitHub receiver.
+#   Generate: python3 -c "import secrets; print(secrets.token_hex(32))"
+github_webhook_token: ""
+
+# ── Repository ────────────────────────────────────────────────────────────────
+# (REQUIRED) Per-user GitHub repo (owner/repo). FluxInstance syncs from here.
+repository_name: "ferry133/xxxxxx"
+
+# (REQUIRED) Short cluster identifier — used as NFS dir prefix.
+cluster_name: "xxxxxx"
+# repository_branch: "main"
+# repository_visibility: "public"
+
+# ── NAS ───────────────────────────────────────────────────────────────────────
+# (REQUIRED when storage_backend is "nfs" · not used otherwise)
+# With storage_backend "local-path" there is no NAS and these are omitted; the
+# storage/nfs-subdir extra is skipped automatically rather than left failing.
+nas_server: "10.x.x.x"
+nas_path: "/volume/path"              # NFS export for storage provisioner (sc-nas)
+# nas_coding_path stays optional even on NFS: without it the claude-code
+# workspace uses the profile's default storage class instead.
+# nas_coding_path: "/volume/coding"
+
+# (REQUIRED for appliance) Has age.key been escrowed outside this cluster?
+# Backups are encrypted to the cluster's own public key, so age.key is the only
+# thing that can read them — and on a single-node appliance it sits on the very
+# disk the backups exist to survive. Not defaulted: it has to be stated by
+# whoever did the escrow. See docs/operations/age-key-escrow.md
+# age_key_escrowed: true
+
+# ── Off-site backup ───────────────────────────────────────────────────────────
+# (REQUIRED under the appliance profile · optional otherwise)
+# A single-node appliance on local disk has no redundancy: losing the disk loses
+# the database and the agent's accumulated context. Backups are encrypted with
+# this cluster's own age key before upload, so the destination operator cannot
+# read them — decryption travels with age.key at handover.
+# Create an R2 bucket + API token at dash.cloudflare.com → R2.
+# backup_r2_bucket: ""
+# backup_r2_endpoint: ""              # https://<account-id>.r2.cloudflarestorage.com
+# backup_r2_access_key_id: ""
+# backup_r2_secret_access_key: ""
+
+# ── Cilium BGP (optional) ─────────────────────────────────────────────────────
+# cilium_loadbalancer_mode: "dsr"     # or "snat" — https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/
+# (OPTIONAL) Cilium native routing instead of the default vxlan tunnel.
+# Needed by a cluster that hosts Omni: SideroLink carries WireGuard over the pod
+# network and vxlan's 1370-byte MTU is too small for it ("sendmmsg: message too
+# long"). Requires all nodes on one L2 segment. Removable once the cluster no
+# longer hosts Omni.
+# cilium_native_routing: true
+
+# cilium_bgp_router_addr: "192.168.1.1"
+# cilium_bgp_router_asn: "64513"
+# cilium_bgp_node_asn: "64514"
+
+# ── claudecode/claude-code (base app — deployed on every cluster) ─────────────
+# One instance named "im" is created by default, reachable at
+# im.<cloudflare_domain>. Override the list to rename it or add more
+# (jg-jiahd sets ["cc"], i.e. cc.jiahd.cc):
+# claude_instances:
+#   - "im"
+#   - "trello"
+#
+# (OPTIONAL) Which instances stay running. Defaults to none: each is a
+# root shell with cluster-admin RBAC that the Cloudflare tunnel makes reachable,
+# so it is scaled to 1 only while actively supporting the cluster.
+#
+# Declare it here rather than running `kubectl scale`. A hand-scaled replica
+# survives until the next reconcile and then disappears — which presents as an
+# unexplained outage, not as a setting being enforced.
+# claude_code_always_on:
+#   - "im"
+#
+# (REQUIRED unless Auth0 login is configured below) ttyd basic auth.
+ttyd_credential: "user:password"      # also used by the default/ttyd extra
+#
+# Optional Auth0 login (replaces ttyd basic auth with an oauth2-proxy
+# sidecar). Setting claudecode_auth0_domain switches every instance to
+# OIDC mode: ttyd binds loopback only, the route goes through oauth2-proxy
+# on :4180, and only claudecode_allowed_emails may log in. In the Auth0
+# app (Regular Web Application) add per instance:
+#   Allowed Callback URLs: https://<instance>.<domain>/oauth2/callback
+#   Allowed Logout URLs / Web Origins: https://<instance>.<domain>
+# claudecode_auth0_domain: "your-tenant.us.auth0.com"
+# claudecode_auth0_client_id: ""
+# claudecode_auth0_client_secret: ""
+# claudecode_oauth2_cookie_secret: ""  # 32-byte base64, e.g. `openssl rand -base64 32`
+# claudecode_allowed_emails: "a@example.com,b@example.com"
+# Each instance runs hostNetwork + a network-diagnostics toolkit (nmap,
+# masscan, arp-scan, tcpdump, fping, ...) with CAP_NET_RAW, for remotely
+# supporting a non-technical client's LAN/router. Deployed with
+# replicas: 0 — scale to 1 only while actively supporting that client
+# by editing controllers.<instance>.replicas in the client's rendered
+# kubernetes/apps/base/claudecode/claude-code/instances/helmrelease.yaml
+# and pushing (GitOps-tracked; Flux reconciles it back to 0 otherwise).
+# A live `kubectl scale deploy/<instance> --replicas=1` also works for
+# an immediate one-off, but Flux will reset it on the next reconcile.
+#
+# Optional talos-mcp sidecar: gives the agent isolated, read-only Talos
+# diagnostics (node status, etcd members, network link state, service logs)
+# for THIS client's cluster, without any credential crossing the remote-
+# operator boundary. Needs THREE values, all per-client, one-time setup:
+#
+# 1. In Omni's Web UI (Settings -> Service Accounts -> Create Service
+#    Account), create a NEW service account scoped to Omni Role "Reader"
+#    (NOT Admin/Operator -- Reader is what actually caps it at os:reader
+#    when proxied to Talos; there is no `--roles`/`--scope` flag on any
+#    CLI path, the *identity's own Omni Role* is the only scoping lever).
+#    Name it e.g. talos-mcp-<cluster>, pick an expiry, copy the displayed
+#    `OMNI_SERVICE_ACCOUNT_KEY` -> talos_mcp_sa_key below.
+# 2. Generate that identity's talosconfig:
+#      OMNI_ENDPOINT=<see step 3> OMNI_SERVICE_ACCOUNT_KEY=<from step 1> \
+#      omnictl talosconfig -c <cluster> -f <output-path>
+#    Paste the resulting file's full contents (multi-line YAML) as-is into
+#    talos_mcp_config below; task configure base64-wraps it before
+#    encrypting. (The file itself carries no key material -- it's routing
+#    metadata only. Auth happens via talos_mcp_sa_key at runtime, read
+#    directly by talosctl's own auth library from OMNI_SERVICE_ACCOUNT_KEY.)
+# 3. talos_mcp_omni_endpoint MUST be a *direct* gRPC path to this client's
+#    Omni instance, bypassing any Cloudflare Tunnel in front of it --
+#    confirmed 2026-07-30 that Cloudflare Tunnel breaks gRPC trailers,
+#    which the Talos siderov1 proxy's streaming calls depend on (symptom:
+#    "server closed the stream without sending trailers"). Use (or add) a
+#    nginx-ingress Ingress with annotation
+#    `nginx.ingress.kubernetes.io/backend-protocol: GRPC` pointed at the
+#    Omni service's control-plane port (jcom's precedent: omni-grpc-ing ->
+#    svc/omni:8080), and use ITS hostname here, not the Tunnel-fronted one.
+# talos_mcp_config: |
+#   context: ...
+#   contexts:
+#     ...
+# talos_mcp_sa_key: ""            # OMNI_SERVICE_ACCOUNT_KEY from step 1
+# talos_mcp_omni_endpoint: ""     # e.g. https://omni-grpc.<client-host>, from step 3
+
+
+# ── monitoring/daily-check (base app — deployed on every cluster) ─────────────
+# Daily cluster health check CronJob → emails report via Gmail SMTP and pings
+# healthchecks.io for dead-man-switch coverage.
+#
+# The CronJob ships on every cluster; these fields only decide where the report
+# goes. Leave them unset and each run exits 0 with a "not configured" log line —
+# no failing Jobs, but also no health reporting, so fill them in.
+#
+# Setup:
+# 1. Enable 2FA on your Gmail account
+# 2. Generate an App Password: https://myaccount.google.com/apppasswords
+# 3. Sign up at https://healthchecks.io (free tier 20 checks); create one check
+#    per cluster with expected interval = 1d + grace 6h; copy the ping URL
+# daily_check_smtp_host: "smtp.gmail.com"      # default if omitted
+# daily_check_smtp_port: "587"                  # default if omitted
+# daily_check_smtp_username: ""                 # Gmail address used to send
+# daily_check_smtp_password: ""                 # 16-char Gmail App Password
+# daily_check_smtp_from: ""                     # usually same as username, or "Name <addr@gmail.com>"
+# daily_check_notify_email_to: ""               # comma-separated, e.g. "you@gmail.com,backup@gmail.com"
+# daily_check_healthchecks_ping_url: ""         # https://hc-ping.com/<uuid>
+# daily_check_endpoints: ""                     # space-separated, e.g. "https://app1.<domain> https://app2.<domain>"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §2. EXTRAS — pick which optional apps to deploy
+# ═══════════════════════════════════════════════════════════════════════════════
+# Available extras and the params each one needs:
+#
+#   claudecode/postgres          → claudecode_postgres_password, claude_code_database_url
+#   (claudecode/claude-code and monitoring/daily-check are BASE apps now — see §1)
+#   default/echo                 → (no extra params)
+#   default/homebridge           → (no extra params)
+#   default/linebot              → anthropic_api_key, database_url,
+#                                  line_channel_access_token, line_channel_secret, line_notify_group_id,
+#                                  trello_api_key, trello_api_token
+#   default/mariadb              → mariadb_lb_ip
+#   default/mqtt                 → mqtt_lb_ip
+#   default/postgres             → postgres_password
+#   default/synophoto            → synophoto_auth0_* (3),
+#                                  synophoto_allowed_emails, synophoto_flask_secret_key,
+#                                  synophoto_nas_username, synophoto_nas_password
+#   default/trello-notifier      → trello_api_key, trello_api_token, trello_board_id,
+#                                  line_channel_access_token, line_notify_group_id
+#   default/ttyd                 → ttyd_credential
+#   freepbx/freepbx              → freepbx_mysql_root_password, freepbx_mysql_password
+#   ingress-nginx/ingress-nginx  → ingress_nginx_lb_ip
+#   kube-system/cilium           → (requires Omni cniConfig:none MachineConfigPatch)
+#   network/cloudflare-tunnel-lan→ cloudflare_lan_tunnel_token
+#   omni/omni                    → omni_gpg_key, omni_udp_lb_ip
+# extras: []
+# Example:
+# extras:
+#   - default/trello-notifier
+#   - default/mqtt
+
+# ── network/cloudflare-tunnel-lan ─────────────────────────────────────────────
+# cloudflare_lan_tunnel_token: ""     # `cloudflared tunnel token <name>` output
+
+# ── claudecode/postgres ───────────────────────────────────────────────────────
+# claudecode_postgres_password: ""
+# claude_code_database_url: ""        # e.g. postgresql://claudecode:<pw>@postgres.claudecode.svc/claudecode
+
+# ── default/postgres ──────────────────────────────────────────────────────────
+# postgres_password: ""
+
+# ── default/mqtt ──────────────────────────────────────────────────────────────
+# Every *_lb_ip below is added to this cluster's LoadBalancer pool. The pool
+# contains only the addresses listed here plus the three gateway addresses in
+# §1 — an address that is not listed is one the Service cannot be given.
+# mqtt_lb_ip: "10.9.x.x"
+
+# ── default/trello-notifier ───────────────────────────────────────────────────
+# trello_api_key: ""
+# trello_api_token: ""
+# trello_board_id: ""                 # monitored Trello board ID
+# line_channel_access_token: ""
+# line_notify_group_id: ""
+
+# ── default/linebot ───────────────────────────────────────────────────────────
+# anthropic_api_key: ""
+# database_url: ""                    # e.g. postgresql://linebot:<pw>@postgres.db.svc/linebot
+# line_channel_access_token: ""       # shared with trello-notifier if both enabled
+# line_channel_secret: ""
+# line_notify_group_id: ""            # shared with trello-notifier if both enabled
+# trello_api_key: ""                  # shared with trello-notifier if both enabled
+# trello_api_token: ""                # shared with trello-notifier if both enabled
+
+# ── default/synophoto ─────────────────────────────────────────────────────────
+# Auth0: create a Regular Web App at manage.auth0.com
+#   Allowed Callback URLs: https://synophoto.<cloudflare_domain>/callback
+#   Allowed Logout URLs:   https://synophoto.<cloudflare_domain>
+# synophoto_auth0_domain: ""          # e.g. "your-tenant.us.auth0.com"
+# synophoto_auth0_client_id: ""
+# synophoto_auth0_client_secret: ""
+# synophoto_allowed_emails: ""        # comma-separated, e.g. "alice@example.com,bob@example.com"
+# synophoto_flask_secret_key: ""      # python3 -c "import secrets; print(secrets.token_hex(32))"
+# synophoto_nas_username: ""          # NAS SA: FileStation + target share write + photo team-space access
+# synophoto_nas_password: ""
+
+# ── default/ttyd ──────────────────────────────────────────────────────────────
+# ttyd_credential: "ops:CHANGE-ME"    # shared with claude-code if both enabled
+#
+# This guards a shell that the Cloudflare tunnel makes reachable from the
+# internet as soon as it connects — no port forward, no firewall change — and
+# the hostname enters Certificate Transparency logs when its certificate is
+# issued. `task configure` refuses to render a weak one: user:password form,
+# at least 20 characters after the colon, no default usernames.
+#   python3 -c "import secrets; print('ops:' + secrets.token_urlsafe(24))"
+
+# ── default/mariadb ───────────────────────────────────────────────────────────
+# mariadb_lb_ip: "10.9.x.x"           # was hardcoded to 10.9.1.2 in jg-base
+
+# ── ingress-nginx/ingress-nginx ───────────────────────────────────────────────
+# ingress_nginx_lb_ip: "10.9.x.x"
+
+# ── freepbx/freepbx ───────────────────────────────────────────────────────────
+# freepbx_mysql_root_password: ""
+# freepbx_mysql_password: ""
+
+# ── omni/omni ─────────────────────────────────────────────────────────────────
+# omni_udp_lb_ip: "10.9.x.x"          # was hardcoded to 10.9.8.8 in jg-base
+# GPG private key for omni etcd encryption. Generate with:
+#   (export GNUPGHOME=$(mktemp -d); gpg --batch --passphrase '' --quick-gen-key x; \
+#    gpg -a --export-secret-key; rm -rf $GNUPGHOME)
+# Paste the full multiline PGP key including BEGIN/END lines.
+# omni_gpg_key: |
+#   -----BEGIN PGP PRIVATE KEY BLOCK-----
+#   ...
+#   -----END PGP PRIVATE KEY BLOCK-----
