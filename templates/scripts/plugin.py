@@ -223,13 +223,21 @@ class Plugin(makejinja.plugin.Plugin):
             'envoy_external_service_type',
             'ClusterIP' if data.get('deployment_profile') == 'appliance'
             else 'LoadBalancer')
-        data.setdefault('lan_sharing_key', 'lan' if shared else '')
+        # An appliance shares whether or not the address is declared yet. It
+        # discovers exactly one address, so on the first boot — before anything
+        # is pinned — every LAN service has to share that one or all but the
+        # first sit <pending> forever. Keying off `shared` alone left them with
+        # jg-base's per-service defaults, which differ by service and therefore
+        # share nothing: measured on jgt-appliance, k8s-gateway took 10.9.1.254
+        # under key "k8s-gateway" and envoy-internal waited under "envoy-internal".
+        share_lan = bool(shared) or data.get('deployment_profile') == 'appliance'
+        data.setdefault('lan_sharing_key', 'lan' if share_lan else '')
         # An explicit namespace list, never "*": kustomize strips the quotes
         # around a substituted scalar, and a bare `*` is a YAML alias, so the
         # whole manifest fails to parse after substitution. Naming the two
         # namespaces is also the smaller permission.
         data.setdefault('lan_sharing_cross_namespace',
-                        'network,mqtt' if shared else '')
+                        'network,mqtt' if share_lan else '')
         # Every address this cluster actually hands to a LoadBalancer, so the
         # pool can stop covering the customer's entire LAN. `cluster_api_addr`
         # is deliberately absent: it is a Talos VIP, not a Service.
