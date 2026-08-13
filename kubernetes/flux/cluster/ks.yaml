@@ -131,7 +131,23 @@ spec:
         group: kustomize.toolkit.fluxcd.io
         kind: Kustomization
         name: spegel
-    # appliance, address not yet pinned: let IPAM allocate from the probed pool
+    # appliance: envoy-external always allocates from the probed pool
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/infrastructure/annotations/lbipam.cilium.io~1ips
+            target:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: envoy-external
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
+    # appliance, shared address not yet pinned: allocate it from the pool too
     - patch: |-
         - op: add
           path: /spec/patches/-

@@ -363,21 +363,6 @@ spec:
           - name: envoy-external
             namespace: network
             sectionName: https
-#% if deployment_profile == 'appliance' %#
-#|         On an appliance envoy-external is a ClusterIP — nothing on the LAN
-           connects to it, cloudflared reaches it by in-cluster DNS. But
-           k8s-gateway still answers this hostname from the parent Gateway, so
-           a LAN client was handed that ClusterIP and could not connect at all.
-           Measured on jgt-appliance: im.janncot.cc resolved to 10.98.111.177.
-
-           Attaching to envoy-internal as well gives the LAN a route to the same
-           backend at the shared address, and keeps the external attachment that
-           carries the Cloudflare tunnel — the remote-support path, which is the
-           whole reason this instance is always on. #|
-          - name: envoy-internal
-            namespace: network
-            sectionName: https
-#% endif %#
         rules:
           - backendRefs:
               - identifier: app

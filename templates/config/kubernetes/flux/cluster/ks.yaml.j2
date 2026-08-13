@@ -147,29 +147,46 @@ spec:
         kind: Kustomization
         name: #{ name }#
 #% endfor %#
-#% if deployment_profile == 'appliance' and not lan_shared_addr | default('') %#
-#| An appliance that has not yet pinned its address must be able to come up on
-   its own. jg-base asks for a specific address by annotation, falling back to
-   `0.0.0.0` when the cluster declares none — a request LB-IPAM can never
-   satisfy, so the service stays `<pending>` forever and the LAN has no
-   resolver. Measured on jgt-appliance: `lan-address-probe` selected
-   10.9.1.254 and published it, while k8s-gateway sat pending asking for
+#% if deployment_profile == 'appliance' %#
+#| An appliance discovers its addresses, so it must never ask for a specific
+   one. jg-base asks by annotation, falling back to `0.0.0.0` when the cluster
+   declares none — a request LB-IPAM can never satisfy, so the service stays
+   `<pending>` forever. Measured on jgt-appliance: `lan-address-probe` had
+   selected and published 10.9.1.254 while k8s-gateway sat pending asking for
    0.0.0.0.
 
-   Removing the annotation lets IPAM allocate from the pool the probe created.
-   That pool holds exactly one address, and the two services share it through
-   the sharing-key, so the outcome is the same address the probe chose.
+   Removing the annotation lets IPAM allocate from the probed pool.
 
    `remove`, not an empty value: the Gateway CRD rejects a null annotation.
 
-   Only for the un-pinned case. Once `lan_shared_addr` is declared the
-   annotation carries it, which is the whole point of pinning (see
-   docs/operations/router-dns.md) — the address is then an external contract
-   with the router and must not be reselected.
-
-   envoy-external is untouched: under this profile its Service is a ClusterIP,
-   so LB-IPAM never reads its annotation. #|
-    # appliance, address not yet pinned: let IPAM allocate from the probed pool
+   envoy-external never pins, even after `lan_shared_addr` is declared: that
+   field pins the address the LAN-facing services share, and envoy-external
+   cannot be one of them — it listens on the same 80/443 as envoy-internal, so
+   Cilium will not let it share. It takes the pool's second address, and with
+   the first one spoken for by annotation there is only one left to take. #|
+    # appliance: envoy-external always allocates from the probed pool
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/infrastructure/annotations/lbipam.cilium.io~1ips
+            target:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: envoy-external
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
+#% endif %#
+#% if deployment_profile == 'appliance' and not lan_shared_addr | default('') %#
+#| The shared address, on the other hand, is only free while it is un-pinned.
+   Once `lan_shared_addr` is declared the annotation carries it, which is the
+   whole point of pinning (see docs/operations/router-dns.md) — the address is
+   then an external contract with the router and must not be reselected. #|
+    # appliance, shared address not yet pinned: allocate it from the pool too
     - patch: |-
         - op: add
           path: /spec/patches/-

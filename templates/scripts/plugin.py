@@ -215,14 +215,14 @@ class Plugin(makejinja.plugin.Plugin):
         data.setdefault(
             'deploy_k8s_gateway',
             bool(data['k8s_gateway']) if 'k8s_gateway' in data else True)
-        # Nothing on the LAN connects to the external gateway — cloudflared
-        # reaches it by in-cluster DNS name — so on an appliance it takes no LAN
-        # address at all. Elsewhere it stays a LoadBalancer, because operators do
-        # reach it directly today and changing that is not this change's business.
-        data.setdefault(
-            'envoy_external_service_type',
-            'ClusterIP' if data.get('deployment_profile') == 'appliance'
-            else 'LoadBalancer')
+        # A LoadBalancer on every profile, appliance included. The appliance used
+        # to make it a ClusterIP on the reasoning that nothing on the LAN
+        # connects to it — cloudflared reaches it by in-cluster DNS. That
+        # reasoning missed k8s-gateway, which answers a hostname from whatever
+        # address its parent Gateway holds: on jgt-appliance every externally
+        # routed name resolved to a ClusterIP no LAN client could reach. The
+        # probe now finds a second address for it instead.
+        data.setdefault('envoy_external_service_type', 'LoadBalancer')
         # An appliance shares whether or not the address is declared yet. It
         # discovers exactly one address, so on the first boot — before anything
         # is pinned — every LAN service has to share that one or all but the
