@@ -131,6 +131,22 @@ spec:
         group: kustomize.toolkit.fluxcd.io
         kind: Kustomization
         name: spegel
+    # single node: one envoy replica per gateway, not two
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: replace
+                path: /spec/provider/kubernetes/envoyDeployment/replicas
+                value: 1
+            target:
+              group: gateway.envoyproxy.io
+              kind: EnvoyProxy
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
     # appliance: envoy-external always allocates from the probed pool
     - patch: |-
         - op: add

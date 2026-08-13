@@ -147,6 +147,32 @@ spec:
         kind: Kustomization
         name: #{ name }#
 #% endfor %#
+#% if is_single_node %#
+#| Two envoy replicas per gateway buy nothing on one node — both land on the
+   same machine, so the second is a copy that dies with the first — and they
+   are the largest thing on the cluster. Measured on jgt-appliance: four envoy
+   pods requesting 1056Mi each, 4.2GiB of a 7GiB node, which left the second
+   replica of each gateway Pending on Insufficient memory indefinitely.
+
+   Applied to every EnvoyProxy rather than by name, so a gateway added later
+   is covered without anyone remembering this. #|
+    # single node: one envoy replica per gateway, not two
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: replace
+                path: /spec/provider/kubernetes/envoyDeployment/replicas
+                value: 1
+            target:
+              group: gateway.envoyproxy.io
+              kind: EnvoyProxy
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
+#% endif %#
 #% if deployment_profile == 'appliance' %#
 #| An appliance discovers its addresses, so it must never ask for a specific
    one. jg-base asks by annotation, falling back to `0.0.0.0` when the cluster
