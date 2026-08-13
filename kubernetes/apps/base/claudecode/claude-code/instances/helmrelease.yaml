@@ -1,0 +1,154 @@
+# claude-code is a base app: every cluster gets one instance. "im" is the
+# default name (im.${SECRET_DOMAIN}); rename it or add more via
+# claude_instances in cluster.yaml -- jg-jiahd overrides it to "cc"
+# (cc.jiahd.cc). The shared manifests (namespace, SA/RBAC, OCIRepository,
+# secrets) come from jg-base kubernetes/apps/base/claudecode.
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: im
+  namespace: claudecode
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: claude-code
+  interval: 1h
+  # With replicas at 0 no pod ever schedules, and a WaitForFirstConsumer storage
+  # class binds a PVC only when one does — so Helm waiting for these claims to
+  # bind would time out and fail the release permanently. Immediate binding
+  # (what an NFS class does) hides this; local-path exposes it. Harmless when
+  # the instance is always on, so it is not made conditional.
+  install:
+    disableWait: true
+  upgrade:
+    disableWait: true
+  values:
+    controllers:
+      im:
+        strategy: Recreate
+        # A LAN-facing root shell with network-scanning capability and
+        # cluster-admin RBAC (see rbac.yaml in the jg-base claudecode app), so
+        # it is off unless the cluster asks for it: scale to 1 only while
+        # actively supporting this client.
+        #
+        # Declared rather than scaled by hand. A `kubectl scale` survives until
+        # the next reconcile and then vanishes, which reads as an outage with no
+        # cause — jgt-omni lost its terminal exactly that way on 2026-08-12, and
+        # jg-jiahd carries a hand-edited copy of this file for the same reason.
+        replicas: 1
+        serviceAccount:
+          name: claude-code # shared SA, RBAC bound in jg-base claudecode app
+        containers:
+          app:
+            image:
+              repository: ghcr.io/ferry133/claude-code
+              tag: 8228f58
+            env:
+              # The pod runs as uid 0 (see defaultPodOptions), which would
+              # resolve HOME=/root -- but all state (claude config PVC,
+              # keyring, workspace) lives under /home/claude.
+              HOME: /home/claude
+              # Without this, onboarding/account state goes to ~/.claude.json
+              # in the ephemeral overlay and login is lost on every pod
+              # restart; inside CLAUDE_CONFIG_DIR it lands on the PVC.
+              CLAUDE_CONFIG_DIR: /home/claude/.claude
+              # tmux asks the locale whether an attaching client can take
+              # UTF-8; with LANG unset it decides no and rewrites every
+              # non-ASCII cell as "_" on the way to the browser, which is how
+              # Traditional Chinese reached cc.jiahd.cc as rows of underscores
+              # (2026-08-11). Fixed at the image level too (LANG + `tmux -u`),
+              # but set here as well so it holds on any tag predating that and
+              # regardless of what the image ships.
+              LANG: C.UTF-8
+              TTYD_CREDENTIAL:
+                valueFrom:
+                  secretKeyRef:
+                    name: claude-code-secret
+                    key: TTYD_CREDENTIAL
+            probes:
+              liveness:
+                enabled: true
+                custom: true
+                spec:
+                  tcpSocket:
+                    port: 7681
+                  initialDelaySeconds: 15
+                  periodSeconds: 30
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+              readiness:
+                enabled: true
+                custom: true
+                spec:
+                  tcpSocket:
+                    port: 7681
+                  initialDelaySeconds: 15
+                  periodSeconds: 30
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi
+    persistence:
+      claude-config:
+        type: persistentVolumeClaim
+        storageClass: local-path
+        accessMode: ReadWriteOnce
+        size: 5Gi
+        globalMounts:
+          - path: /home/claude/.claude
+          # gnome-keyring's store -- claude's OAuth tokens land here via
+          # secret-service; without this mount they die with the pod.
+          - path: /home/claude/.local/share/keyrings
+            subPath: keyrings
+      claude-workspace:
+        type: persistentVolumeClaim
+        storageClass: local-path
+        accessMode: ReadWriteOnce
+        size: 20Gi
+        globalMounts:
+          - path: /home/claude/workspace
+    defaultPodOptions:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        # root, not uid 1000 (user-confirmed 2026-07-26): the NAS NFS exports
+        # only allow root -- uid 1000 saw /home/claude/coding as d---------
+        # (mode 000). Root's default runtime caps also cover NET_RAW, which
+        # retires the setcap-file-capability + allowPrivilegeEscalation dance
+        # the scanners needed under uid 1000. HOME is pinned to /home/claude
+        # via container env.
+        runAsUser: 0
+        runAsGroup: 0
+      labels:
+        hostnetwork-group: claude-code
+      # hostNetwork pods all bind :7681 on the node -- hard-require spreading
+      # across nodes so multiple claude_instances on the same client never
+      # collide.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  hostnetwork-group: claude-code
+              topologyKey: kubernetes.io/hostname
+    service:
+      app:
+        ports:
+          http:
+            port: 7681
+    route:
+      app:
+        hostnames: ["im.${SECRET_DOMAIN}"]
+        parentRefs:
+          - name: envoy-external
+            namespace: network
+            sectionName: https
+        rules:
+          - backendRefs:
+              - identifier: app
+                port: 7681
