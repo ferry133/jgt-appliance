@@ -1,6 +1,7 @@
 # Secrets — never commit
 age.key
 github-deploy.key
+github-deploy.key.pub
 github-push-token.txt
 cloudflare-tunnel.json
 
