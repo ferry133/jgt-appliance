@@ -147,6 +147,60 @@ spec:
         kind: Kustomization
         name: #{ name }#
 #% endfor %#
+#% if deployment_profile == 'appliance' and not lan_shared_addr | default('') %#
+#| An appliance that has not yet pinned its address must be able to come up on
+   its own. jg-base asks for a specific address by annotation, falling back to
+   `0.0.0.0` when the cluster declares none — a request LB-IPAM can never
+   satisfy, so the service stays `<pending>` forever and the LAN has no
+   resolver. Measured on jgt-appliance: `lan-address-probe` selected
+   10.9.1.254 and published it, while k8s-gateway sat pending asking for
+   0.0.0.0.
+
+   Removing the annotation lets IPAM allocate from the pool the probe created.
+   That pool holds exactly one address, and the two services share it through
+   the sharing-key, so the outcome is the same address the probe chose.
+
+   `remove`, not an empty value: the Gateway CRD rejects a null annotation.
+
+   Only for the un-pinned case. Once `lan_shared_addr` is declared the
+   annotation carries it, which is the whole point of pinning (see
+   docs/operations/router-dns.md) — the address is then an external contract
+   with the router and must not be reselected.
+
+   envoy-external is untouched: under this profile its Service is a ClusterIP,
+   so LB-IPAM never reads its annotation. #|
+    # appliance, address not yet pinned: let IPAM allocate from the probed pool
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/infrastructure/annotations/lbipam.cilium.io~1ips
+            target:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: envoy-internal
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/values/service/annotations/lbipam.cilium.io~1ips
+            target:
+              group: helm.toolkit.fluxcd.io
+              kind: HelmRelease
+              name: k8s-gateway
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: k8s-gateway
+#% endif %#
 #% if cilium_native_routing | default(false) %#
 #| Cilium native routing instead of the default vxlan tunnel. Needed by a
    cluster that hosts Omni: SideroLink carries WireGuard over the pod network,

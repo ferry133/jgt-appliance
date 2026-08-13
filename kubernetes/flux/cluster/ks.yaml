@@ -131,6 +131,37 @@ spec:
         group: kustomize.toolkit.fluxcd.io
         kind: Kustomization
         name: spegel
+    # appliance, address not yet pinned: let IPAM allocate from the probed pool
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/infrastructure/annotations/lbipam.cilium.io~1ips
+            target:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: envoy-internal
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: envoy-gateway
+    - patch: |-
+        - op: add
+          path: /spec/patches/-
+          value:
+            patch: |-
+              - op: remove
+                path: /spec/values/service/annotations/lbipam.cilium.io~1ips
+            target:
+              group: helm.toolkit.fluxcd.io
+              kind: HelmRelease
+              name: k8s-gateway
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        name: k8s-gateway
 ---
 # ── claude-code instances (base; per-cluster rendered from claude_instances) ──
 # The shared pieces (namespace, SA/RBAC, OCIRepository, secrets) come from
