@@ -1,9 +1,14 @@
 # What a wrongly-scoped Cloudflare token looks like
 
-A measurement, captured 2026-08-16 on this cluster while its `cloudflare_token`
-was still broken. It is written down because **repairing the token destroys the
-evidence**: afterwards nobody can demonstrate that a scope check catches this
-without deliberately constructing a broken credential.
+**A dated record, not a procedure.** Captured 2026-08-16 on this cluster while its
+`cloudflare_token` was still broken; **repaired the same day in `546016a`**. It was
+written down first because repairing the token destroys the evidence — the broken
+credential stops existing, so afterwards nobody can demonstrate that a scope check
+catches this without deliberately constructing a bad token.
+
+If you run these calls today you will get case A-after below: one zone, `active`,
+matching nameservers. **That confirms the repair, it does not contradict the
+capture.** The token ids here belong to credentials that are gone.
 
 The point of the record is narrow and it is not "we misconfigured a token". It is
 that **three different credentials all pass "is this token valid?" and only one of
@@ -19,14 +24,26 @@ All three are `cfut_…`, 53 characters, and all three return
 
 | | token id | `GET /zones` | zone status | zone `name_servers` | live delegation | works |
 |---|---|---|---|---|---|---|
-| **A** — this cluster, broken | `e2702ae3…` | `200`, `success:true`, **0 zones** | — | — | — | no |
+| **A-before** — this cluster, broken | `e2702ae3…` | `200`, `success:true`, **0 zones** | — | — | — | no |
+| **A-after** — same field, repaired | `7c3fa77e…` | `200`, **1 zone** `janncot.cc` `b67776ce…` | `active` | `marge` / `sage` | `marge` / `sage` | **yes** |
 | **B** — `jgt-omni-accept`, same domain | `edca407f…` | `200`, **1 zone** `janncot.cc` `c9851d69…` | `moved` | `carioca` / `luke` | `marge` / `sage` | **no** |
-| **C** — `jg-jiahd`, a working one | `9b8f84c1…` | `200`, **1 zone** `jiahd.cc` `07142156…` | `active` | `rajeev` / `shubhi` | `rajeev` / `shubhi` | **yes** |
+| **C** — `jg-jiahd`, another working one | `9b8f84c1…` | `200`, **1 zone** `jiahd.cc` `07142156…` | `active` | `rajeev` / `shubhi` | `rajeev` / `shubhi` | **yes** |
 
-B and C differ in nothing that validity or shape can see. Both are 53-character
-`cfut_` tokens, both verify active, both return exactly one zone bearing the
-domain asked for. The two columns that separate them are `status` and whether
-`name_servers` matches the live delegation.
+Read the table by column rather than by row, because that is where the argument is:
+
+- `http_status` and `success` are **identical in all four**. "The API accepted it"
+  is not a check.
+- `count` separates A-before from the rest — and nothing else does.
+- `status` plus the nameserver comparison separates **B** from A-after — and
+  nothing else does. So `count >= 1` is not the assertion either.
+
+A-before and A-after are the *same field on the same cluster*, three days apart.
+B and C differ in nothing cheap: both 53-character `cfut_` tokens, both verify
+active, both return exactly one zone bearing the domain asked for.
+
+Note the zone ids. A-after points at `b67776ce…`; B points at `c9851d69…`. Both
+are live Cloudflare zones named `janncot.cc`, in two different accounts, and only
+the first is the one the domain is delegated to.
 
 ### A — valid, sees nothing
 
@@ -172,14 +189,33 @@ curl -s "https://dns.google/resolve?name=$H&type=$T"
    without being deleted, and without anything logging a complaint.
 3. Tunnel `kube` (`ba6225b6…`) was created in the new account and
    `cloudflare-tunnel.json` updated. That half is correct and the tunnel is up.
-4. `cloudflare_token` was filled with the R2 token. external-dns has been unable
-   to see any zone since, so nothing was ever re-created in the new zone.
+4. `cloudflare_token` was filled with the R2 token. external-dns could not see any
+   zone from then on, so nothing was ever re-created in the new zone.
+5. **2026-08-16, `546016a`** — token replaced with one scoped to zone `b67776ce…`.
+   external-dns created six records within three seconds of the restart, and
+   `https://im.janncot.cc` returned `HTTP/2 401 www-authenticate: Basic
+   realm="ttyd"` through `cf-ray …-SJC`. Public path fixed.
 
 Steps 2–4 each fail quietly. The visible symptom is one hostname not resolving,
 four layers away from any of them.
 
+Two things step 5 did **not** fix, recorded so nobody reads a green public path as
+a green cluster:
+
+- `im.janncot.cc` still does not resolve **on the LAN** — `k8s-gateway` answers
+  NXDOMAIN. The route's `spec.parentRefs` names only `envoy-external`, which has
+  no address because of the LB pool conflict; `envoy-internal` appears in
+  `status.parents` via a Gateway merge but not in the spec. Which of those is the
+  operative cause is not established.
+- `envoy-external` remains `Programmed=False`. It does **not** affect external-dns
+  — the `external-dns.alpha.kubernetes.io/target` annotation on the Gateway
+  supplies the target and the missing address is irrelevant. That was an open
+  question in the first version of this document, resolved by observation when the
+  record appeared anyway.
+
 ## Related
 
-- `cluster.yaml:32` — the field, still holding the R2 token as of this writing
+- `cluster.yaml:32` — the field, repaired in `546016a`; the comment above it
+  records both failure shapes so the next person filling it in sees them
 - `docs/deploy/manual.md:141` — how the correct token is created
 - `cloudflare-tunnel.json.old` — the stale credential the inert records point at
