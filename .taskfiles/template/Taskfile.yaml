@@ -80,7 +80,7 @@ tasks:
         sh: test -f {{.TEMPLATE_CONFIG_FILE}}
       # Without this, rendering dies partway through cluster-secrets with a
       # Python traceback and leaves a half-written kubernetes/ directory.
-      - msg: File cloudflare-tunnel.json not found — create it with `cloudflared tunnel create --credentials-file cloudflare-tunnel.json kubernetes` (see docs/deploy/manual.md, Stage 4)
+      - msg: File cloudflare-tunnel.json not found — create it with `cloudflared tunnel create --credentials-file cloudflare-tunnel.json kube` (see docs/deploy/manual.md, Stage 4)
         sh: test -f {{.ROOT_DIR}}/cloudflare-tunnel.json
 
   check:
