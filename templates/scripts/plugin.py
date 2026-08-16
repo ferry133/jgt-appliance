@@ -263,13 +263,30 @@ class Plugin(makejinja.plugin.Plugin):
         # overlap with PoolConflict=cidr_overlap whether or not the wide one is
         # disabled. So a cluster with nothing to enumerate writes out the whole
         # node CIDR here, which is what it was getting implicitly anyway.
-        if addrs:
-            blocks = [{'start': a, 'stop': a} for a in addrs]
-        elif data.get('deployment_profile') == 'appliance':
-            # An appliance declares no addresses; lan-address-probe discovers one
-            # and publishes it as a second pool. This one stays empty so the two
+        if data.get('deployment_profile') == 'appliance':
+            # An appliance declares no addresses; lan-address-probe discovers them
+            # and publishes them as a second pool. This one stays empty so the two
             # cannot overlap — Cilium rejects overlapping pools outright.
+            #
+            # Checked BEFORE `addrs`, not after, and the ordering is the whole
+            # fix. `lan_shared_addr` back-fills cluster_gateway_addr and
+            # cluster_dns_gateway_addr above, which are the very fields `addrs`
+            # reads — so pinning an address made `addrs` non-empty and this
+            # branch unreachable. `pool` then carried 10.9.1.254, which the probe
+            # had already published in `pool-discovered`, and Cilium disabled the
+            # whole discovered pool with PoolConflict=True. Measured on
+            # jgt-appliance: envoy-external sat <pending> with no address, its
+            # Gateway never went Programmed, and k8s-gateway answered NXDOMAIN
+            # for every externally routed name — so the LAN could not reach a
+            # service that was serving the public fine.
+            #
+            # Pinning is expressed by the lbipam.cilium.io/ips annotation, which
+            # selects an address out of a pool. It never needed a pool of its own,
+            # and on an appliance it cannot have one: every address it could pin
+            # is by construction an address the probe already found.
             blocks = []
+        elif addrs:
+            blocks = [{'start': a, 'stop': a} for a in addrs]
         else:
             blocks = [{'cidr': str(data.get('node_cidr'))}]
         data.setdefault('lb_pool_blocks',
