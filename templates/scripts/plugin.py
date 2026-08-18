@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import Any
 
 import base64
+import hashlib
+import hmac
 import ipaddress
 import makejinja
 import re
@@ -117,6 +119,53 @@ def github_push_token(file_path: str = 'github-push-token.txt') -> str:
         raise RuntimeError(f"Unexpected error while reading {file_path}: {e}")
 
 
+# Return the shared claude-code Auth0 application's fields from auth0.json
+#
+# A local file rather than cluster.yaml fields because this template repo is
+# public and every cluster fronts claude-code with the same Auth0 application:
+# one copied file per cluster directory beats pasting the same client secret
+# into twenty configs. Same idiom as cloudflare-tunnel.json — gitignored, read
+# at render time, never committed.
+#
+# Missing here is a hard stop, not an empty default: OIDC mode gives ttyd no
+# fallback (it binds loopback), so a cluster rendered with a blank client
+# secret deploys a terminal nobody can reach.
+def auth0_config(file_path: str = 'auth0.json') -> dict[str, str]:
+    try:
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"File not found: {file_path} — claude-code defaults to Auth0 login. "
+            f"Copy auth0.json from another cluster directory, or set "
+            f"`claudecode_auth0: false` in cluster.yaml to use ttyd basic auth.")
+    except json.JSONDecodeError:
+        raise ValueError(f"Could not decode JSON file: {file_path}")
+
+    missing = [k for k in ('domain', 'client_id', 'client_secret')
+               if not data.get(k)]
+    if missing:
+        raise KeyError(f"Missing or empty in {file_path}: {', '.join(missing)}")
+    return data
+
+
+# Derive oauth2-proxy's cookie secret from the cluster's own age key
+#
+# Derived rather than generated so it is stable: a fresh random value on every
+# render would sign every session out at each `task configure` and rewrite the
+# encrypted secret for no reason. Derived rather than shared so a cookie minted
+# for one cluster cannot be replayed at another — jg-jiahd and jgtest were
+# hand-copied the same value, which is the mistake this closes.
+#
+# 32 bytes, base64url — the one length oauth2-proxy accepts besides 16 and 24.
+def oauth2_cookie_secret(cluster_name: str, file_path: str = 'age.key') -> str:
+    key = age_key('private', file_path)
+    digest = hmac.new(key.encode('utf-8'),
+                      f"claudecode-oauth2-cookie:{cluster_name}".encode('utf-8'),
+                      hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode('utf-8')
+
+
 # Return a list of files in the talos patches directory
 def talos_patches(value: str) -> list[str]:
     path = Path(f'templates/config/talos/patches/{value}')
@@ -164,6 +213,44 @@ class Plugin(makejinja.plugin.Plugin):
         # shell with cluster-admin that the tunnel makes reachable. Named here
         # rather than scaled by hand, which works until the next reconcile.
         data.setdefault('claude_code_always_on', [])
+        # Auth0 OIDC in front of every claude-code instance, on by default.
+        #
+        # The alternative is ttyd basic auth, a single shared password in front
+        # of a root shell with cluster-admin that the tunnel publishes to the
+        # internet — one credential for every operator, rotated by editing
+        # twenty configs, and no record of who opened the terminal. OIDC gives
+        # per-person accounts, an email allowlist, and revocation in one place.
+        #
+        # What it costs: OIDC mode leaves ttyd on loopback with no fallback, so
+        # the instance is reachable only while oauth2-proxy can reach Auth0 and
+        # the callback URL is registered. claude-code is the rescue path for a
+        # cluster whose Omni/SideroLink is down, so that path now depends on a
+        # third party being up. A cluster that will not accept the trade turns
+        # it off with `claudecode_auth0: false` and supplies ttyd_credential.
+        data.setdefault(
+            'claudecode_auth0_enabled',
+            bool(data['claudecode_auth0']) if 'claudecode_auth0' in data
+            else True)
+        if data['claudecode_auth0_enabled']:
+            # Read auth0.json only for what cluster.yaml has not already
+            # answered. The clusters that configured Auth0 before the file
+            # existed spell all of it out inline, and requiring the file from
+            # them anyway would break their next `task configure` over a value
+            # they already have.
+            fields = ('domain', 'client_id', 'client_secret')
+            if not all(data.get(f'claudecode_auth0_{f}') for f in fields) \
+                    or not data.get('claudecode_allowed_emails'):
+                auth0 = auth0_config()
+                for field in fields:
+                    data.setdefault(f'claudecode_auth0_{field}', auth0[field])
+                # cluster.yaml wins where a cluster needs someone auth0.json
+                # does not list — the client's own address, say.
+                if auth0.get('allowed_emails'):
+                    data.setdefault('claudecode_allowed_emails',
+                                    auth0['allowed_emails'])
+            if not data.get('claudecode_oauth2_cookie_secret'):
+                data['claudecode_oauth2_cookie_secret'] = oauth2_cookie_secret(
+                    data['cluster_name'])
         # Backups are encrypted to the cluster's own age public key, taken from
         # .sops.yaml rather than added as another field to fill in. The key is
         # already there, it is already the thing that travels with the cluster
@@ -258,18 +345,37 @@ class Plugin(makejinja.plugin.Plugin):
                 lb_addrs.append(str(data[field]))
         seen: set[str] = set()
         addrs = [a for a in lb_addrs if not (a in seen or seen.add(a))]
-        # There is exactly one pool. A second, narrower pool alongside the wide
-        # one cannot work — being a subset it overlaps, and Cilium rejects any
-        # overlap with PoolConflict=cidr_overlap whether or not the wide one is
-        # disabled. So a cluster with nothing to enumerate writes out the whole
-        # node CIDR here, which is what it was getting implicitly anyway.
-        if addrs:
-            blocks = [{'start': a, 'stop': a} for a in addrs]
-        elif data.get('deployment_profile') == 'appliance':
-            # An appliance declares no addresses; lan-address-probe discovers one
-            # and publishes it as a second pool. This one stays empty so the two
-            # cannot overlap — Cilium rejects overlapping pools outright.
+        # There is exactly one pool per cluster. A second, narrower pool alongside
+        # a wide one cannot work — being a subset it overlaps, and Cilium rejects
+        # any overlap with PoolConflict whether or not the wide one is disabled.
+        # So a cluster with nothing to enumerate writes out the whole node CIDR
+        # here, which is what it was getting implicitly anyway.
+        #
+        # The appliance test comes FIRST, and the order is the whole fix for
+        # ferry133/jg-cluster-template#10.
+        #
+        # It used to sit after `if addrs:` and was therefore unreachable exactly
+        # when it mattered. `lan_shared_addr` back-fills cluster_gateway_addr and
+        # cluster_dns_gateway_addr about eighty lines above, and those are two of
+        # the three fields `addrs` is built from — so declaring the shared address
+        # (which docs/operations/router-dns.md tells every appliance operator to
+        # do before touching the router) silently populated `addrs` and took the
+        # first branch. The result on jgt-appliance: a static `pool` holding
+        # 10.9.1.254 overlapping lan-address-probe's `pool-discovered`
+        # [10.9.1.254, 10.9.1.253], Cilium disabling the whole discovered pool
+        # with PoolConflict=True, and .253 — the only address envoy-external can
+        # use — ceasing to exist. Every LAN name in the cluster's domain went
+        # NXDOMAIN while the same names answered fine over the public tunnel,
+        # because cloudflared's origin is a ClusterIP and never needed the LB.
+        #
+        # An appliance discovers its addresses at runtime and lan-address-probe
+        # owns allocating them, so the static pool must be empty on an appliance
+        # unconditionally — whether or not the operator has since declared the
+        # address he was told to declare.
+        if data.get('deployment_profile') == 'appliance':
             blocks = []
+        elif addrs:
+            blocks = [{'start': a, 'stop': a} for a in addrs]
         else:
             blocks = [{'cidr': str(data.get('node_cidr'))}]
         data.setdefault('lb_pool_blocks',
@@ -281,6 +387,20 @@ class Plugin(makejinja.plugin.Plugin):
             'local_path_is_default',
             'true' if data.get('storage_backend') != 'nfs' else 'false',
         )
+        # Whether Longhorn is installed. `storage_backend: "replicated"` implies
+        # it, but a NAS-backed cluster can ask for it too — the NAS is right for
+        # bulk and wrong for a database, and Longhorn is the one block class that
+        # does not pin the pod to a node. Those clusters cannot say so through
+        # storage_backend, which also decides whether nfs-subdir runs.
+        #
+        # This is not db_storage_class: installing the tier and moving a database
+        # onto it are separate, because storageClassName is immutable and moving
+        # means dump and restore. Keeping them separate is what lets the install
+        # be verified before anything depends on it.
+        data.setdefault(
+            'deploy_longhorn',
+            bool(data['replicated_storage']) if 'replicated_storage' in data
+            else data.get('storage_backend') == 'replicated')
         # Single-node clusters must not run components that require peers. The
         # node list is only authoritative on the manual path — the Omni path
         # always renders `nodes: []` — so an Omni cluster that is not an

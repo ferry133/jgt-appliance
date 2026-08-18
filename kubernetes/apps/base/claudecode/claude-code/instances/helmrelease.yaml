@@ -61,9 +61,9 @@ spec:
               # but set here as well so it holds on any tag predating that and
               # regardless of what the image ships.
               LANG: C.UTF-8
-              # OIDC mode: the oauth2-proxy sidecar is the only way in --
-              # ttyd binds loopback and requires the email header the proxy
-              # injects (value surfaces as TTYD_USER -> CLAUDE_USER_ID).
+              # OIDC mode (the default): the oauth2-proxy sidecar is the only
+              # way in -- ttyd binds loopback and requires the email header the
+              # proxy injects (value surfaces as TTYD_USER -> CLAUDE_USER_ID).
               # Explicit IP, not "lo": ttyd resolves an interface name to its
               # first non-127 address (Talos puts 169.254.x.x on lo).
               TTYD_INTERFACE: 127.0.0.1

@@ -67,7 +67,8 @@ tasks:
     prompt: Any conflicting files in the kubernetes directory will be overwritten... continue?
     cmds:
       - task: check-integrity
-      - task: check-ttyd-credential
+      - task: check-claudecode-auth
+      - task: check-lb-pool-render
       - task: generate-node-config
       - task: validate-schemas
       - task: render-configs
@@ -80,7 +81,7 @@ tasks:
         sh: test -f {{.TEMPLATE_CONFIG_FILE}}
       # Without this, rendering dies partway through cluster-secrets with a
       # Python traceback and leaves a half-written kubernetes/ directory.
-      - msg: File cloudflare-tunnel.json not found — create it with `cloudflared tunnel create --credentials-file cloudflare-tunnel.json kube` (see docs/deploy/manual.md, Stage 4)
+      - msg: File cloudflare-tunnel.json not found — create it with `cloudflared tunnel create --credentials-file cloudflare-tunnel.json kubernetes` (see docs/deploy/manual.md, Stage 4)
         sh: test -f {{.ROOT_DIR}}/cloudflare-tunnel.json
 
   check:
@@ -95,14 +96,28 @@ tasks:
     preconditions:
       - test -f {{.SCRIPTS_DIR}}/check-template-integrity.py
 
-  # Before rendering, not after: the credential guards a shell the tunnel makes
-  # publicly reachable, so a weak one should stop the render rather than be
-  # discovered once it is already deployed.
-  check-ttyd-credential:
+  # Before rendering, not after: this gate stands in front of a shell the
+  # tunnel makes publicly reachable, so a missing Auth0 application or a weak
+  # ttyd credential should stop the render rather than be discovered once it is
+  # already deployed. Missing auth0.json in particular would otherwise surface
+  # as a traceback partway through cluster-secrets, leaving a half-written
+  # kubernetes/ directory behind.
+  check-claudecode-auth:
     internal: true
-    cmd: python3 {{.SCRIPTS_DIR}}/check-ttyd-credential.py {{.TEMPLATE_CONFIG_FILE}}
+    cmd: python3 {{.SCRIPTS_DIR}}/check-claudecode-auth.py {{.TEMPLATE_CONFIG_FILE}}
     preconditions:
-      - test -f {{.SCRIPTS_DIR}}/check-ttyd-credential.py
+      - test -f {{.SCRIPTS_DIR}}/check-claudecode-auth.py
+
+  # An appliance emitting a non-empty static pool is #10 returning: it overlaps
+  # lan-address-probe's discovered pool, Cilium disables the whole discovered
+  # pool, and every LAN name goes NXDOMAIN while the public tunnel keeps
+  # answering. The original defect was an unreachable branch, which review does
+  # not catch and no rendered artifact shows.
+  check-lb-pool-render:
+    internal: true
+    cmd: python3 {{.SCRIPTS_DIR}}/check-lb-pool-render.py
+    preconditions:
+      - test -f {{.SCRIPTS_DIR}}/check-lb-pool-render.py
 
   validate-schemas:
     internal: true
@@ -147,23 +162,26 @@ tasks:
       - test -d {{.KUBERNETES_DIR}}
       - which kubeconform kustomize
 
+  # Encrypts only what actually changed. The previous form re-encrypted every
+  # file on every run: makejinja re-renders each *.sops.* as plaintext, so
+  # `sops filestatus` reported `encrypted: false` correctly, and SOPS derives a
+  # fresh data key per encryption — identical plaintext, entirely new
+  # ciphertext, ~162 lines of secret diff after a no-op `task configure`.
+  # A diff that is always there is a diff nobody reads. See the script header.
   encrypt-secrets:
     internal: true
     cmds:
-      - for: { var: SECRET_FILES }
-        cmd: |
-          if [ $(sops filestatus "{{.ITEM}}" | jq ".encrypted") == "false" ]; then
-              sops --encrypt --in-place "{{.ITEM}}"
-          fi
-    vars:
-      SECRET_FILES:
-        # TALOS_DIR is included so talsecret.sops.yaml and any other Talos-side
-        # secret is covered on the manual path (rendered before this step runs).
-        sh: find "{{.BOOTSTRAP_DIR}}" "{{.KUBERNETES_DIR}}" "{{.TALOS_DIR}}" -type f -name "*.sops.*" -print 2>/dev/null
+      # Directories, not a file list: the previous `sh:` var produced
+      # newline-separated paths, and interpolating those into a command line
+      # makes the shell read each newline as a command separator. The script
+      # runs its own find. TALOS_DIR is included so talsecret.sops.yaml and any
+      # other Talos-side secret is covered on the manual path.
+      - bash {{.SCRIPTS_DIR}}/encrypt-secrets.sh "{{.BOOTSTRAP_DIR}}" "{{.KUBERNETES_DIR}}" "{{.TALOS_DIR}}"
     preconditions:
+      - test -f {{.SCRIPTS_DIR}}/encrypt-secrets.sh
       - test -f {{.SOPS_AGE_KEY_FILE}}
       - test -f {{.ROOT_DIR}}/.sops.yaml
-      - which jq sops
+      - which jq sops yq
 
   debug:
     desc: Gather common resources in your cluster

@@ -68,15 +68,18 @@ spec:
               # this pod is hostNetwork.
               TALOS_MCP_URL: http://127.0.0.1:8765/sse
 #% endif %#
-#% if claudecode_auth0_domain is defined %#
-              # OIDC mode: the oauth2-proxy sidecar is the only way in --
-              # ttyd binds loopback and requires the email header the proxy
-              # injects (value surfaces as TTYD_USER -> CLAUDE_USER_ID).
+#% if claudecode_auth0_enabled %#
+              # OIDC mode (the default): the oauth2-proxy sidecar is the only
+              # way in -- ttyd binds loopback and requires the email header the
+              # proxy injects (value surfaces as TTYD_USER -> CLAUDE_USER_ID).
               # Explicit IP, not "lo": ttyd resolves an interface name to its
               # first non-127 address (Talos puts 169.254.x.x on lo).
               TTYD_INTERFACE: 127.0.0.1
               TTYD_AUTH_HEADER: X-Forwarded-Email
 #% else %#
+              # Only reached via `claudecode_auth0: false`. One shared password
+              # in front of a cluster-admin root shell -- see the note on
+              # claudecode_auth0_enabled in plugin.py for what that gives up.
               TTYD_CREDENTIAL:
                 valueFrom:
                   secretKeyRef:
@@ -84,7 +87,7 @@ spec:
                     key: TTYD_CREDENTIAL
 #% endif %#
             probes:
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
               # ttyd binds loopback, unreachable from kubelet's tcpSocket
               # probe (hostNetwork pod IP) -- check from inside the pod.
               liveness:
@@ -198,7 +201,7 @@ spec:
               limits:
                 memory: 128Mi
 #% endif %#
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
           oauth2-proxy:
             image:
               repository: quay.io/oauth2-proxy/oauth2-proxy
@@ -259,7 +262,7 @@ spec:
               limits:
                 memory: 128Mi
 #% endif %#
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
     configMaps:
       oauth2-emails:
         data:
@@ -302,7 +305,7 @@ spec:
         globalMounts:
           - path: /home/claude/coding
 #% endif %#
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
       oauth2-emails:
         type: configMap
         identifier: oauth2-emails
@@ -351,7 +354,7 @@ spec:
       app:
         ports:
           http:
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
             port: 4180
 #% else %#
             port: 7681
@@ -366,7 +369,7 @@ spec:
         rules:
           - backendRefs:
               - identifier: app
-#% if claudecode_auth0_domain is defined %#
+#% if claudecode_auth0_enabled %#
                 port: 4180
 #% else %#
                 port: 7681

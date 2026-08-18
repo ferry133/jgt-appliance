@@ -105,7 +105,7 @@ spec:
         group: kustomize.toolkit.fluxcd.io
         kind: Kustomization
         name: nfs-client-provisioner
-    # suspended: storage_backend is local-path; replicated storage also needs Talos system extensions on every node
+    # suspended: replicated_storage is not set and storage_backend is local-path; Longhorn also needs Talos system extensions on every node
     - patch: |-
         apiVersion: kustomize.toolkit.fluxcd.io/v1
         kind: Kustomization
